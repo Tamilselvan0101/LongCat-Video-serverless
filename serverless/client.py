@@ -15,6 +15,10 @@ Useful options:
     --frames 121         longer clip; must be 4*k+1, e.g. 61, 93, 121
     --seed 7             change the seed to get a different video from the same prompt
     --health             just check that the endpoint is alive
+    --job-id <id>        reconnect to a job already running (Ctrl+C does not cancel it)
+
+Be patient on the first call after a build: RunPod has to pull a 12 GB image and load
+83 GB of weights before any generation starts. Five to ten minutes is normal.
 """
 
 import argparse
@@ -72,6 +76,51 @@ def build_input(args):
     return job_input
 
 
+STATE_LABELS = {
+    "IN_QUEUE": "queued - the worker is starting (image pull, then loading the model)",
+    "IN_PROGRESS": "the worker is running your job",
+}
+
+
+def wait_for_job(endpoint, job_id, api_key, poll_seconds=5, quiet_tick=30):
+    """
+    Poll until the job reaches a final state. Returns the final status dict.
+
+    Prints on every state change and on progress messages from the worker, plus a
+    heartbeat every 30 seconds so a long wait does not look like a hang.
+    """
+    started = time.time()
+    last_note = None
+    last_state = None
+    last_tick = 0
+
+    while True:
+        time.sleep(poll_seconds)
+        elapsed = int(time.time() - started)
+        status = get_json(f"{endpoint}/status/{job_id}", api_key)
+        state = status.get("status")
+
+        # While the job runs, `output` holds the worker's latest progress string.
+        note = status.get("output") if isinstance(status.get("output"), str) else None
+        if note and note != last_note:
+            print(f"  [{elapsed}s] {note}")
+            last_note = note
+        elif state != last_state:
+            print(f"  [{elapsed}s] {STATE_LABELS.get(state, state)}")
+        elif elapsed - last_tick >= quiet_tick:
+            print(f"  [{elapsed}s] still working ...")
+            last_tick = elapsed
+
+        if state != last_state:
+            last_state = state
+            last_tick = elapsed
+
+        if state == "COMPLETED":
+            return status
+        if state in ("FAILED", "CANCELLED", "TIMED_OUT"):
+            sys.exit(f"Job {state}:\n{json.dumps(status, indent=2)}")
+
+
 def save_output(output, out_path):
     """Write the mp4 from either the inline base64 or the S3 link."""
     if output.get("video_base64"):
@@ -102,6 +151,12 @@ def main():
     parser.add_argument("--negative-prompt", dest="negative_prompt", default=None)
     parser.add_argument("--out", default=None, help="output file name")
     parser.add_argument("--health", action="store_true", help="only ping the endpoint")
+    parser.add_argument(
+        "--job-id",
+        dest="job_id",
+        default=None,
+        help="reconnect to a job already running instead of submitting a new one",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("RUNPOD_API_KEY")
@@ -112,46 +167,54 @@ def main():
             "  export RUNPOD_API_KEY=rpa_xxxxxxxx\n"
             "  export RUNPOD_ENDPOINT_ID=abc123xyz"
         )
-    if not args.prompt and not args.health:
+    if not args.prompt and not args.health and not args.job_id:
         sys.exit('Give a prompt, e.g.  python3 serverless/client.py "a cat on a skateboard"')
 
     endpoint = f"{BASE_URL}/{endpoint_id}"
+    started = time.time()
+
+    if args.job_id:
+        # Reconnect to a job that is already running (e.g. after pressing Ctrl+C).
+        job_id = args.job_id
+        print(f"reconnecting to job {job_id} ...")
+    else:
+        try:
+            submitted = post_json(f"{endpoint}/run", {"input": build_input(args)}, api_key)
+        except urllib.error.HTTPError as error:
+            sys.exit(
+                f"RunPod rejected the request ({error.code}): {error.read().decode('utf-8')}"
+            )
+
+        job_id = submitted.get("id")
+        if not job_id:
+            sys.exit(f"Unexpected response from RunPod: {submitted}")
+
+        print(f"job {job_id} submitted, waiting for the worker ...")
+        print(
+            "The FIRST request after a build is slow: RunPod pulls a 12 GB image, then\n"
+            "the worker loads 83 GB of weights. Five to ten minutes is normal. Later\n"
+            "requests take ~2 minutes cold, or seconds while the worker is still warm.\n"
+        )
 
     try:
-        submitted = post_json(f"{endpoint}/run", {"input": build_input(args)}, api_key)
-    except urllib.error.HTTPError as error:
-        sys.exit(f"RunPod rejected the request ({error.code}): {error.read().decode('utf-8')}")
-
-    job_id = submitted.get("id")
-    if not job_id:
-        sys.exit(f"Unexpected response from RunPod: {submitted}")
-
-    print(f"job {job_id} submitted, waiting for the worker ...")
-    started = time.time()
-    last_note = None
-
-    while True:
-        time.sleep(5)
-        status = get_json(f"{endpoint}/status/{job_id}", api_key)
-        state = status.get("status")
-
-        note = status.get("output") if isinstance(status.get("output"), str) else None
-        if note and note != last_note:
-            print(f"  [{int(time.time() - started)}s] {note}")
-            last_note = note
-        elif state == "IN_QUEUE":
-            print(f"  [{int(time.time() - started)}s] waiting in queue (worker starting up)")
-
-        if state == "COMPLETED":
-            break
-        if state in ("FAILED", "CANCELLED", "TIMED_OUT"):
-            sys.exit(f"Job {state}: {json.dumps(status, indent=2)}")
+        status = wait_for_job(endpoint, job_id, api_key)
+    except KeyboardInterrupt:
+        sys.exit(
+            "\n\nStopped watching - but the job is STILL RUNNING on RunPod.\n"
+            "Pressing Ctrl+C here does not cancel it. Reconnect with:\n\n"
+            f"    python3 serverless/client.py --job-id {job_id}\n"
+        )
 
     output = status.get("output") or {}
     if output.get("error"):
         sys.exit(f"The worker returned an error: {output['error']}")
 
     if args.health:
+        print(json.dumps(output, indent=2))
+        return
+
+    if not (output.get("video_base64") or output.get("video_url")):
+        # Happens when you reconnect with --job-id to what was actually a health check.
         print(json.dumps(output, indent=2))
         return
 
