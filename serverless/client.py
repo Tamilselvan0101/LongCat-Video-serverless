@@ -41,6 +41,7 @@ def post_json(url, payload, api_key):
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
         },
         method="POST",
     )
@@ -50,7 +51,12 @@ def post_json(url, payload, api_key):
 
 def get_json(url, api_key):
     request = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {api_key}"}, method="GET"
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+        },
+        method="GET",
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -80,6 +86,48 @@ STATE_LABELS = {
     "IN_QUEUE": "queued - no worker has picked this up yet",
     "IN_PROGRESS": "a worker is running this job",
 }
+
+
+def post_gql(payload, api_key):
+    url = f"https://api.runpod.io/graphql?api_key={api_key}"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+            "api_key": api_key,
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def cancel_job(endpoint, job_id, api_key):
+    """Cancel a running or queued job on RunPod."""
+    try:
+        res = post_json(f"{endpoint}/cancel/{job_id}", {}, api_key)
+        print(f"Cancel request for job {job_id}: {json.dumps(res, indent=2)}")
+        return res
+    except urllib.error.HTTPError as error:
+        sys.exit(f"Failed to cancel job {job_id} ({error.code}): {error.read().decode('utf-8')}")
+
+
+def purge_queue(endpoint_id, api_key):
+    """Purge all queued jobs on the RunPod endpoint via Serverless v2 REST API."""
+    endpoint = f"{BASE_URL}/{endpoint_id}"
+    try:
+        res = post_json(f"{endpoint}/purge-queue", {}, api_key)
+        print(f"Purge queue result: {json.dumps(res, indent=2)}")
+        return res
+    except urllib.error.HTTPError as error:
+        try:
+            res = post_json(f"{endpoint}/purge_queue", {}, api_key)
+            print(f"Purge queue result: {json.dumps(res, indent=2)}")
+            return res
+        except urllib.error.HTTPError:
+            sys.exit(f"Failed to purge queue ({error.code}): {error.read().decode('utf-8')}")
 
 
 def show_endpoint_status(endpoint, api_key):
@@ -195,6 +243,17 @@ def main():
         help="show worker/queue state and diagnose a stuck endpoint (no job submitted)",
     )
     parser.add_argument(
+        "--cancel",
+        dest="cancel_id",
+        default=None,
+        help="cancel a running or queued job by ID",
+    )
+    parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="purge all queued jobs on the endpoint without needing job IDs",
+    )
+    parser.add_argument(
         "--job-id",
         dest="job_id",
         default=None,
@@ -210,11 +269,26 @@ def main():
             "  export RUNPOD_API_KEY=rpa_xxxxxxxx\n"
             "  export RUNPOD_ENDPOINT_ID=abc123xyz"
         )
-    if not args.prompt and not args.health and not args.job_id and not args.status:
+    if (
+        not args.prompt
+        and not args.health
+        and not args.job_id
+        and not args.status
+        and not args.cancel_id
+        and not args.purge
+    ):
         sys.exit('Give a prompt, e.g.  python3 serverless/client.py "a cat on a skateboard"')
 
     endpoint = f"{BASE_URL}/{endpoint_id}"
     started = time.time()
+
+    if args.purge:
+        purge_queue(endpoint_id, api_key)
+        return
+
+    if args.cancel_id:
+        cancel_job(endpoint, args.cancel_id, api_key)
+        return
 
     if args.status:
         show_endpoint_status(endpoint, api_key)
