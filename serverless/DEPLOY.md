@@ -17,16 +17,16 @@ the cost is a few dollars a month for storing the model weights.
 
 ## 0. What was added to your project, and why
 
-| File                                       | What it is                                                                     |
-| ------------------------------------------ | ------------------------------------------------------------------------------ |
-| `serverless/handler.py`                  | The server. Loads the model once, then turns each request into an mp4.         |
-| `Dockerfile`                             | The recipe RunPod uses to build your worker (Python, PyTorch, FlashAttention). |
-| `serverless/requirements-serverless.txt` | The exact Python package versions the worker needs.                            |
-| `serverless/setup_weights.sh`            | One-time script that downloads the 83 GB model onto your storage.              |
+| File                                       | What it is                                                                                    |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `serverless/handler.py`                  | The server. Loads the model once, then turns each request into an mp4.                        |
+| `Dockerfile`                             | The recipe RunPod uses to build your worker (Python, PyTorch, FlashAttention).                |
+| `serverless/requirements-serverless.txt` | The exact Python package versions the worker needs.                                           |
+| `serverless/setup_weights.sh`            | One-time script that downloads the 83 GB model onto your storage.                             |
 | `serverless/convert_to_bf16.py`          | **Optional, off by default.** Shrinks the model 83 GB → ~44 GB for faster cold starts. |
-| `serverless/client.py`                   | Runs on your Mac. Sends a prompt, saves the mp4.                               |
-| `serverless/test_input.json`             | A sample request, used for testing.                                            |
-| `.dockerignore`                          | Keeps junk out of the build.                                                   |
+| `serverless/client.py`                   | Runs on your Mac. Sends a prompt, saves the mp4.                                              |
+| `serverless/test_input.json`             | A sample request, used for testing.                                                           |
+| `.dockerignore`                          | Keeps junk out of the build.                                                                  |
 
 **The original `run_demo_text_to_video.py` cannot be used as-is on serverless.** It
 requires `torchrun` and calls `torch.distributed.init_process_group`, which is for
