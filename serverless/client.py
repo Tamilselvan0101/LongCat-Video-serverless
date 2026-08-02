@@ -328,7 +328,10 @@ def main():
 
     output = status.get("output") or {}
     if output.get("error"):
-        sys.exit(f"The worker returned an error: {output['error']}")
+        message = f"The worker returned an error: {output['error']}"
+        if output.get("traceback"):
+            message += "\n\n--- traceback from the worker ---\n" + output["traceback"]
+        sys.exit(message)
 
     if args.health:
         print(json.dumps(output, indent=2))

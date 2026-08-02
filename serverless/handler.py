@@ -32,20 +32,33 @@ import threading
 import time
 import traceback
 
-import numpy as np
-import PIL.Image
-import torch
 import runpod
-from torchvision.io import write_video
-from transformers import AutoTokenizer, UMT5EncoderModel
 
-from longcat_video.context_parallel import context_parallel_util
-from longcat_video.modules.autoencoder_kl_wan import AutoencoderKLWan
-from longcat_video.modules.longcat_video_dit import LongCatVideoTransformer3DModel
-from longcat_video.modules.scheduling_flow_match_euler_discrete import (
-    FlowMatchEulerDiscreteScheduler,
-)
-from longcat_video.pipeline_longcat_video import LongCatVideoPipeline
+# Everything below can fail for environment reasons: a CUDA build that does not match
+# the GPU, a missing system library, an incompatible package pin. If one of these raises,
+# the process would exit and RunPod would only tell you "worker exited with exit code 1 /
+# all workers are unhealthy", with the real traceback buried in the platform logs.
+#
+# So instead of dying, we record the traceback and start the worker anyway. Any request
+# then comes straight back with the exact error, which you can read in your own terminal.
+STARTUP_ERROR = None
+try:
+    import numpy as np
+    import PIL.Image
+    import torch
+    from torchvision.io import write_video
+    from transformers import AutoTokenizer, UMT5EncoderModel
+
+    from longcat_video.context_parallel import context_parallel_util
+    from longcat_video.modules.autoencoder_kl_wan import AutoencoderKLWan
+    from longcat_video.modules.longcat_video_dit import LongCatVideoTransformer3DModel
+    from longcat_video.modules.scheduling_flow_match_euler_discrete import (
+        FlowMatchEulerDiscreteScheduler,
+    )
+    from longcat_video.pipeline_longcat_video import LongCatVideoPipeline
+except BaseException:  # noqa: BLE001 - including SystemExit, which some libs raise
+    STARTUP_ERROR = traceback.format_exc()
+    print("[longcat] STARTUP IMPORT FAILED\n" + STARTUP_ERROR, flush=True)
 
 # --------------------------------------------------------------------------------------
 # Defaults. Changing these changes the behaviour of every request that does not
@@ -245,12 +258,17 @@ def loader_thread_target():
         print("[longcat] MODEL FAILED TO LOAD\n" + traceback.format_exc(), flush=True)
 
 
-LOADER_THREAD = threading.Thread(target=loader_thread_target, daemon=True)
-LOADER_THREAD.start()
+if STARTUP_ERROR is None:
+    LOADER_THREAD = threading.Thread(target=loader_thread_target, daemon=True)
+    LOADER_THREAD.start()
+else:
+    LOAD_STATE["stage"] = "imports failed"
 
 
 def wait_until_loaded(timeout=None):
     """Block until the background load finishes. Returns an error string, or None."""
+    if LOADER_THREAD is None:
+        return "The worker never started loading because its imports failed."
     LOADER_THREAD.join(timeout)
     if LOADER_THREAD.is_alive():
         return (
@@ -388,6 +406,14 @@ def deliver(path, job_id, tensor, fps, crf):
 
 def handler(job):
     job_input = job.get("input") or {}
+
+    # The worker could not even import its dependencies. Hand the caller the traceback
+    # rather than making them dig through the platform logs.
+    if STARTUP_ERROR is not None:
+        return {
+            "error": "The worker failed to start: one of its imports raised.",
+            "traceback": STARTUP_ERROR,
+        }
 
     # Health check: answers immediately, even while the model is still loading, so you
     # can always tell the difference between "slow" and "broken".
