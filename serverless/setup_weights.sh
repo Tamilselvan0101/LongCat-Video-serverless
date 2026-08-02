@@ -31,6 +31,22 @@ done
 VOLUME_DIR="${VOLUME_DIR:-/workspace}"
 TARGET_DIR="$VOLUME_DIR/weights/LongCat-Video"
 
+# Say up front exactly what is about to happen, so a stale copy of this script can
+# never quietly modify your weights.
+echo "======================================================================"
+echo " LongCat-Video weight setup"
+echo " target:              $TARGET_DIR"
+if [ "$CONVERT_BF16" = "1" ]; then
+    echo " bfloat16 conversion: ENABLED  (float32 originals will be REPLACED)"
+    echo
+    echo " Press Ctrl+C within 10 seconds to abort."
+    sleep 10
+else
+    echo " bfloat16 conversion: DISABLED (original float32 weights are kept)"
+fi
+echo "======================================================================"
+echo
+
 echo "==> Installing the Hugging Face downloader"
 # Note: no --upgrade for torch. The pod template already has a working PyTorch and
 # replacing it would download several more GB for no reason.
