@@ -34,6 +34,11 @@ import traceback
 
 import runpod
 
+# Bump this whenever handler.py changes. It is printed at start-up and returned by the
+# health check, so you can always confirm which build a worker is actually running
+# instead of guessing whether a rebuild deployed.
+HANDLER_REVISION = "2026-08-02-e-cu128"
+
 # Everything below can fail for environment reasons: a CUDA build that does not match
 # the GPU, a missing system library, an incompatible package pin. If one of these raises,
 # the process would exit and RunPod would only tell you "worker exited with exit code 1 /
@@ -41,11 +46,6 @@ import runpod
 #
 # So instead of dying, we record the traceback and start the worker anyway. Any request
 # then comes straight back with the exact error, which you can read in your own terminal.
-# Bump this whenever handler.py changes. It is printed at start-up and returned by the
-# health check, so you can always confirm which build a worker is actually running
-# instead of guessing whether a rebuild deployed.
-HANDLER_REVISION = "2026-08-02-d"
-
 STARTUP_ERROR = None
 try:
     import numpy as np

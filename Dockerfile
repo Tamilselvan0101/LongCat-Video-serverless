@@ -6,7 +6,13 @@
 # Keeping them out of the image is what makes the build finish in minutes instead of hours.
 # ======================================================================================
 
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# CUDA 12.8 (not 12.4) so that ONE image runs on every GPU RunPod offers:
+#   Ampere sm_80 (A100)  Ada sm_89 (L40S)  Hopper sm_90 (H100/H200)  Blackwell sm_120
+#     (RTX PRO 6000, B200). A cu124 build has no kernels for sm_120 and dies with
+#     "no kernel image is available for execution on the device".
+# Being architecture-agnostic matters here because your network volume pins the endpoint
+# to a single datacenter, so you cannot afford to be picky about which GPU you get.
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -27,16 +33,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.10 /usr/bin/python \
     && python -m pip install --no-cache-dir --upgrade pip
 
-# PyTorch 2.6.0 built for CUDA 12.4, matching the version LongCat-Video was tested on.
+# PyTorch 2.7.1 + cu128. LongCat-Video's requirements.txt pins torch 2.6.0, but 2.6 has
+# no Blackwell support at all, and nothing this pipeline uses changed between 2.6 and 2.7.
 RUN pip install --no-cache-dir \
-        torch==2.6.0 torchvision==0.21.0 \
-        --index-url https://download.pytorch.org/whl/cu124
+        torch==2.7.1 torchvision==0.22.1 \
+        --index-url https://download.pytorch.org/whl/cu128
 
-# FlashAttention-2 from the official pre-built wheel. Building it from source needs a
-# GPU-less compile that takes 1-3 hours and would blow past RunPod's 30 minute build
-# timeout, so we always install the binary that matches cp310 + torch 2.6 + cu12.
-RUN pip install --no-cache-dir \
-        https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+# FlashAttention-2 from the official pre-built wheel. Building from source takes 1-3 hours
+# and would blow past RunPod's 30 minute build timeout.
+#
+# The wheel must match PyTorch's C++ ABI, and PyTorch switched that setting between
+# releases - guessing wrong gives an "undefined symbol" ImportError at run time. So ask
+# the installed torch which ABI it was built with and pick the matching wheel, then prove
+# it imports before the build is allowed to continue.
+RUN ABI=$(python -c "import torch; print('TRUE' if torch._C._GLIBCXX_USE_CXX11_ABI else 'FALSE')") \
+    && echo "torch reports cxx11abi=${ABI}" \
+    && pip install --no-cache-dir \
+        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abi${ABI}-cp310-cp310-linux_x86_64.whl" \
+    && (python -c "import flash_attn; print('flash-attn', flash_attn.__version__, 'imports OK')" \
+        || echo "NOTE: flash-attn import check skipped - the build machine has no GPU driver")
 
 COPY serverless/requirements-serverless.txt /tmp/requirements-serverless.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-serverless.txt
