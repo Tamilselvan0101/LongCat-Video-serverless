@@ -41,6 +41,11 @@ RUN pip install --no-cache-dir \
 COPY serverless/requirements-serverless.txt /tmp/requirements-serverless.txt
 RUN pip install --no-cache-dir -r /tmp/requirements-serverless.txt
 
+# Guard: if anything above had pulled torch again, pip would have installed the CPU-only
+# build from PyPI and the worker would fail at run time with "No CUDA GPU visible".
+# Better to fail the build here, loudly, than to discover that on the first request.
+RUN python -c "import torch, torchvision; assert torch.version.cuda, f'CUDA build of torch was replaced by {torch.__version__}'; print('OK torch', torch.__version__, '| torchvision', torchvision.__version__, '| cuda', torch.version.cuda)"
+
 WORKDIR /app
 COPY longcat_video /app/longcat_video
 COPY serverless/handler.py /app/handler.py
