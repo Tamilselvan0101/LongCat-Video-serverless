@@ -41,6 +41,11 @@ import runpod
 #
 # So instead of dying, we record the traceback and start the worker anyway. Any request
 # then comes straight back with the exact error, which you can read in your own terminal.
+# Bump this whenever handler.py changes. It is printed at start-up and returned by the
+# health check, so you can always confirm which build a worker is actually running
+# instead of guessing whether a rebuild deployed.
+HANDLER_REVISION = "2026-08-02-d"
+
 STARTUP_ERROR = None
 try:
     import numpy as np
@@ -58,7 +63,12 @@ try:
     from longcat_video.pipeline_longcat_video import LongCatVideoPipeline
 except BaseException:  # noqa: BLE001 - including SystemExit, which some libs raise
     STARTUP_ERROR = traceback.format_exc()
-    print("[longcat] STARTUP IMPORT FAILED\n" + STARTUP_ERROR, flush=True)
+    print(
+        f"[longcat] rev {HANDLER_REVISION} STARTUP IMPORT FAILED\n{STARTUP_ERROR}",
+        flush=True,
+    )
+
+print(f"[longcat] handler revision {HANDLER_REVISION} starting", flush=True)
 
 # --------------------------------------------------------------------------------------
 # Defaults. Changing these changes the behaviour of every request that does not
@@ -412,6 +422,7 @@ def handler(job):
     if STARTUP_ERROR is not None:
         return {
             "error": "The worker failed to start: one of its imports raised.",
+            "handler_revision": HANDLER_REVISION,
             "traceback": STARTUP_ERROR,
         }
 
@@ -420,6 +431,7 @@ def handler(job):
     if job_input.get("health"):
         elapsed = int(time.time() - LOAD_STATE["started_at"])
         report = {
+            "handler_revision": HANDLER_REVISION,
             "stage": LOAD_STATE["stage"],
             "seconds_since_worker_start": elapsed,
             "cuda_available": torch.cuda.is_available(),
