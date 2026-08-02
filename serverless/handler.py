@@ -28,6 +28,7 @@ Environment variables (all optional, set them in the RunPod endpoint UI):
 import base64
 import os
 import tempfile
+import threading
 import time
 import traceback
 
@@ -84,6 +85,12 @@ LOAD_ERROR = None
 LOAD_SECONDS = None
 LOW_VRAM = False
 
+# Loading 83 GB off a network volume takes minutes. It happens on a background thread so
+# that the worker can answer a `{"health": true}` request straight away and tell you which
+# stage it is in, instead of leaving your job sitting silently in the queue.
+LOAD_STATE = {"stage": "starting", "started_at": time.time()}
+LOADER_THREAD = None
+
 
 # --------------------------------------------------------------------------------------
 # Cold start: load the model once
@@ -137,6 +144,13 @@ def enable_text_encoder_offload(pipe):
     torch_gc()
 
 
+def set_stage(stage):
+    """Record and log which part of the (slow) start-up we are in."""
+    LOAD_STATE["stage"] = stage
+    elapsed = int(time.time() - LOAD_STATE["started_at"])
+    print(f"[longcat] [{elapsed}s] {stage}", flush=True)
+
+
 def load_model():
     """Load tokenizer / text encoder / VAE / DiT and both LoRAs onto the GPU."""
     global PIPE, LOAD_ERROR, LOAD_SECONDS, LOW_VRAM
@@ -149,6 +163,7 @@ def load_model():
             "GPU worker (80 GB class recommended)."
         )
 
+    set_stage("locating weights")
     checkpoint_dir = find_model_dir()
     print(f"[longcat] loading weights from {checkpoint_dir}", flush=True)
 
@@ -156,22 +171,28 @@ def load_model():
     # initialised, which is exactly what we want inside a serverless worker.
     cp_split_hw = context_parallel_util.get_optimal_split(1)
 
+    set_stage("loading tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(
         checkpoint_dir, subfolder="tokenizer", torch_dtype=torch.bfloat16
     )
+    set_stage("loading text encoder (~23 GB)")
     text_encoder = UMT5EncoderModel.from_pretrained(
         checkpoint_dir, subfolder="text_encoder", torch_dtype=torch.bfloat16
     )
+    set_stage("loading vae")
     vae = AutoencoderKLWan.from_pretrained(
         checkpoint_dir, subfolder="vae", torch_dtype=torch.bfloat16
     )
+    set_stage("loading scheduler")
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         checkpoint_dir, subfolder="scheduler", torch_dtype=torch.bfloat16
     )
+    set_stage("loading dit (~54 GB, the slow one)")
     dit = LongCatVideoTransformer3DModel.from_pretrained(
         checkpoint_dir, subfolder="dit", cp_split_hw=cp_split_hw, torch_dtype=torch.bfloat16
     )
 
+    set_stage("moving model to gpu")
     pipe = LongCatVideoPipeline(
         tokenizer=tokenizer,
         text_encoder=text_encoder,
@@ -213,11 +234,31 @@ def load_model():
     )
 
 
-try:
-    load_model()
-except Exception as exc:  # noqa: BLE001 - reported back on the first request
-    LOAD_ERROR = f"{type(exc).__name__}: {exc}"
-    print("[longcat] MODEL FAILED TO LOAD\n" + traceback.format_exc(), flush=True)
+def loader_thread_target():
+    global LOAD_ERROR
+    try:
+        load_model()
+        LOAD_STATE["stage"] = "ready"
+    except Exception as exc:  # noqa: BLE001 - reported back on the next request
+        LOAD_ERROR = f"{type(exc).__name__}: {exc}"
+        LOAD_STATE["stage"] = "failed"
+        print("[longcat] MODEL FAILED TO LOAD\n" + traceback.format_exc(), flush=True)
+
+
+LOADER_THREAD = threading.Thread(target=loader_thread_target, daemon=True)
+LOADER_THREAD.start()
+
+
+def wait_until_loaded(timeout=None):
+    """Block until the background load finishes. Returns an error string, or None."""
+    LOADER_THREAD.join(timeout)
+    if LOADER_THREAD.is_alive():
+        return (
+            f"The model is still loading (stage: {LOAD_STATE['stage']}) after "
+            f"{int(time.time() - LOAD_STATE['started_at'])}s. Send "
+            '{"input": {"health": true}} to watch its progress.'
+        )
+    return LOAD_ERROR
 
 
 # --------------------------------------------------------------------------------------
@@ -346,22 +387,40 @@ def deliver(path, job_id, tensor, fps, crf):
 
 
 def handler(job):
-    if LOAD_ERROR is not None:
-        return {"error": f"Model failed to load at worker start-up. {LOAD_ERROR}"}
-
     job_input = job.get("input") or {}
 
-    # Cheap way to check the endpoint is alive without paying for a generation.
+    # Health check: answers immediately, even while the model is still loading, so you
+    # can always tell the difference between "slow" and "broken".
     if job_input.get("health"):
-        free, total = torch.cuda.mem_get_info()
-        return {
-            "status": "ready",
-            "gpu": torch.cuda.get_device_name(0),
-            "vram_total_gb": round(total / 1024**3, 1),
-            "vram_free_gb": round(free / 1024**3, 1),
-            "model_load_seconds": LOAD_SECONDS,
-            "low_vram_mode": LOW_VRAM,
+        elapsed = int(time.time() - LOAD_STATE["started_at"])
+        report = {
+            "stage": LOAD_STATE["stage"],
+            "seconds_since_worker_start": elapsed,
+            "cuda_available": torch.cuda.is_available(),
         }
+        if LOAD_ERROR is not None:
+            report["status"] = "failed"
+            report["error"] = LOAD_ERROR
+            report["hint"] = "The full traceback is in the endpoint's Logs tab."
+        elif LOADER_THREAD.is_alive():
+            report["status"] = "loading"
+            report["hint"] = (
+                "Still reading weights off the network volume. Check again in a minute."
+            )
+        else:
+            free, total = torch.cuda.mem_get_info()
+            report["status"] = "ready"
+            report["gpu"] = torch.cuda.get_device_name(0)
+            report["vram_total_gb"] = round(total / 1024**3, 1)
+            report["vram_free_gb"] = round(free / 1024**3, 1)
+            report["model_load_seconds"] = LOAD_SECONDS
+            report["low_vram_mode"] = LOW_VRAM
+        return report
+
+    # A generation request has to wait for the model.
+    load_error = wait_until_loaded()
+    if load_error is not None:
+        return {"error": load_error}
 
     try:
         cfg = parse_request(job_input)

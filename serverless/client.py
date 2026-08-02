@@ -77,9 +77,45 @@ def build_input(args):
 
 
 STATE_LABELS = {
-    "IN_QUEUE": "queued - the worker is starting (image pull, then loading the model)",
-    "IN_PROGRESS": "the worker is running your job",
+    "IN_QUEUE": "queued - no worker has picked this up yet",
+    "IN_PROGRESS": "a worker is running this job",
 }
+
+
+def show_endpoint_status(endpoint, api_key):
+    """
+    Print RunPod's own view of the endpoint: how many workers exist, what state they
+    are in, and how many jobs are waiting. This is the fastest way to tell whether a
+    long wait is normal slowness or an actual fault.
+    """
+    health = get_json(f"{endpoint}/health", api_key)
+    workers = health.get("workers", {})
+    jobs = health.get("jobs", {})
+
+    print("workers:", json.dumps(workers))
+    print("jobs:   ", json.dumps(jobs))
+    print()
+
+    if workers.get("unhealthy"):
+        print("DIAGNOSIS: a worker is UNHEALTHY - the container is crashing on start-up.")
+        print("  Open the endpoint's Logs tab and look for a Python traceback.")
+    elif workers.get("throttled"):
+        print("DIAGNOSIS: workers are THROTTLED - RunPod has no free GPU of your chosen")
+        print("  type in your network volume's datacenter. Allow more GPU types.")
+    elif workers.get("initializing") and not workers.get("ready") and not workers.get("running"):
+        print("DIAGNOSIS: the worker is still INITIALIZING - pulling the 12 GB image.")
+        print("  Normal for the first few minutes after a build. If it lasts more than")
+        print("  ~15 minutes, check the Logs tab.")
+    elif jobs.get("inQueue") and not workers.get("running"):
+        print("DIAGNOSIS: jobs are queued but no worker is running them.")
+        print("  Check that Max Workers is at least 1 and look at the Logs tab.")
+    elif workers.get("running"):
+        print("DIAGNOSIS: a worker is running your job. This is the healthy case -")
+        print("  loading 83 GB of weights genuinely takes several minutes.")
+    elif workers.get("idle") or workers.get("ready"):
+        print("DIAGNOSIS: a worker is warm and waiting. Requests should be fast now.")
+    else:
+        print("DIAGNOSIS: no workers at all. If jobs are queued, check Max Workers > 0.")
 
 
 def wait_for_job(endpoint, job_id, api_key, poll_seconds=5, quiet_tick=30):
@@ -108,7 +144,9 @@ def wait_for_job(endpoint, job_id, api_key, poll_seconds=5, quiet_tick=30):
         elif state != last_state:
             print(f"  [{elapsed}s] {STATE_LABELS.get(state, state)}")
         elif elapsed - last_tick >= quiet_tick:
-            print(f"  [{elapsed}s] still working ...")
+            # Always name the actual state - "still working" hid whether the job was
+            # queued (nothing has picked it up) or genuinely running.
+            print(f"  [{elapsed}s] still {STATE_LABELS.get(state, state)}")
             last_tick = elapsed
 
         if state != last_state:
@@ -152,6 +190,11 @@ def main():
     parser.add_argument("--out", default=None, help="output file name")
     parser.add_argument("--health", action="store_true", help="only ping the endpoint")
     parser.add_argument(
+        "--status",
+        action="store_true",
+        help="show worker/queue state and diagnose a stuck endpoint (no job submitted)",
+    )
+    parser.add_argument(
         "--job-id",
         dest="job_id",
         default=None,
@@ -167,11 +210,15 @@ def main():
             "  export RUNPOD_API_KEY=rpa_xxxxxxxx\n"
             "  export RUNPOD_ENDPOINT_ID=abc123xyz"
         )
-    if not args.prompt and not args.health and not args.job_id:
+    if not args.prompt and not args.health and not args.job_id and not args.status:
         sys.exit('Give a prompt, e.g.  python3 serverless/client.py "a cat on a skateboard"')
 
     endpoint = f"{BASE_URL}/{endpoint_id}"
     started = time.time()
+
+    if args.status:
+        show_endpoint_status(endpoint, api_key)
+        return
 
     if args.job_id:
         # Reconnect to a job that is already running (e.g. after pressing Ctrl+C).
