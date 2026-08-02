@@ -1,0 +1,30 @@
+# Python packages for the RunPod Serverless worker.
+# torch, torchvision and flash-attn are installed separately in the Dockerfile because
+# they need a special package index / pre-built wheel.
+
+# --- RunPod ---
+runpod>=1.7.0
+boto3>=1.34.0                 # only used when you configure an S3 bucket for output
+
+# --- LongCat-Video (same pins as requirements.txt, minus the UI-only packages) ---
+numpy==1.26.4
+transformers==4.41.0
+tokenizers==0.19.1            # the version transformers 4.41 expects
+huggingface_hub==0.30.2       # compatible with both transformers 4.41 and diffusers 0.35
+accelerate==0.34.2            # lets the 27 GB model load without doubling CPU RAM usage
+diffusers==0.35.1
+safetensors>=0.4.3
+einops==0.8.0
+ftfy==6.2.0
+regex>=2023.12.25
+loguru==0.7.2
+psutil==6.0.0
+tqdm>=4.66
+Pillow>=10.2,<12
+scipy==1.13.1                 # optional sigma schedules in the flow-match scheduler
+sentencepiece==0.2.0          # UMT5 tokenizer fallback
+protobuf>=4.25,<6
+av==12.0.0                    # mp4 writing via torchvision.io.write_video
+opencv-python-headless==4.9.0.80
+imageio==2.37.0
+imageio-ffmpeg==0.6.0

@@ -1,0 +1,14 @@
+# Keep the Docker build context small and the build fast.
+weights/
+assets/
+outputs/
+*.mp4
+*.pdf
+.git/
+.DS_Store
+**/__pycache__/
+*.pyc
+run_streamlit.py
+run_demo_*.py
+serverless/client.py
+serverless/*.md
