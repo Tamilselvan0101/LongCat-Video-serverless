@@ -1,7 +1,11 @@
 """
-Shrink the LongCat-Video checkpoint from float32 to bfloat16, in place.
+OPTIONAL. Shrink the LongCat-Video checkpoint from float32 to bfloat16, in place.
 
-Why: the published checkpoint stores the DiT and the text encoder in float32 (~77 GB),
+You do not need to run this. Everything works with the original float32 weights; this
+only makes cold starts faster, and it cannot be undone without re-downloading 83 GB.
+
+Why it does not change your videos: the published checkpoint stores the DiT and the text
+encoder in float32 (~77 GB),
 but `handler.py` loads them with `torch_dtype=torch.bfloat16`, so every byte of that
 extra precision is thrown away the moment the model reaches the GPU. Converting the
 files once on disk means each cold start reads ~39 GB instead of ~77 GB, which roughly

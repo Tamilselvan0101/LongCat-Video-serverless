@@ -63,34 +63,9 @@ git clone --single-branch --branch main https://github.com/meituan-longcat/LongC
 cd LongCat-Video
 ```
 
-Install dependencies:
+Install dependencies:FlashAttention-2 is enabled in the model config by default; you can also change the model config ("./weights/LongCat-Video/dit/config.json") to use FlashAttention-3 or xformers once installed.
 
-```shell
-# create conda environment
-conda create -n longcat-video python=3.10
-conda activate longcat-video
-
-# install torch (configure according to your CUDA version)
-pip install torch==2.6.0+cu124 torchvision==0.21.0+cu124 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# install flash-attn-2
-pip install ninja 
-pip install psutil 
-pip install packaging 
-pip install flash_attn==2.7.4.post1
-
-# install other requirements
-pip install -r requirements.txt
-
-# install longcat-video-avatar requirements
-conda install -c conda-forge librosa
-conda install -c conda-forge ffmpeg
-pip install -r requirements_avatar.txt
-```
-
-FlashAttention-2 is enabled in the model config by default; you can also change the model config ("./weights/LongCat-Video/dit/config.json") to use FlashAttention-3 or xformers once installed.
-
-### Model Download
+### odel Download
 
 | Models                   | Description                                                                                  | Download Link                                                                   |
 | ------------------------ | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |

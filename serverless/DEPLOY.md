@@ -23,7 +23,7 @@ the cost is a few dollars a month for storing the model weights.
 | `Dockerfile`                             | The recipe RunPod uses to build your worker (Python, PyTorch, FlashAttention). |
 | `serverless/requirements-serverless.txt` | The exact Python package versions the worker needs.                            |
 | `serverless/setup_weights.sh`            | One-time script that downloads the 83 GB model onto your storage.              |
-| `serverless/convert_to_bf16.py`          | Shrinks the model 83 GB → ~44 GB so cold starts are twice as fast.            |
+| `serverless/convert_to_bf16.py`          | **Optional, off by default.** Shrinks the model 83 GB → ~44 GB for faster cold starts. |
 | `serverless/client.py`                   | Runs on your Mac. Sends a prompt, saves the mp4.                               |
 | `serverless/test_input.json`             | A sample request, used for testing.                                            |
 | `.dockerignore`                          | Keeps junk out of the build.                                                   |
@@ -49,7 +49,7 @@ returned over HTTP. Your original files are untouched and still work locally.
 Rough per-video cost on an A100 80 GB:
 
 * 6-second 480p clip, `fast` mode, worker already warm: **~$0.10**
-* Same clip but the worker was asleep (adds ~2 min of model loading): **~$0.20**
+* Same clip but the worker was asleep (adds ~2–3 min of model loading): **~$0.20**
 * With `--refine` (720p, 30 fps): **~$0.40 – $0.70**
 
 The handler returns a `timings` field with the real numbers so you can check this
@@ -133,8 +133,8 @@ disk that your serverless workers mount instantly at startup.
 2. **Datacenter**: pick one that has plenty of GPUs, e.g. `EU-RO-1` or `US-KS-2`.
    ⚠️ **Write this datacenter down.** Your serverless endpoint must run in the same
    datacenter, so this choice limits which GPUs you can use later.
-3. **Size**: `120` GB. (100 GB is the bare minimum; you can grow a volume later but you
-   can never shrink it, so 120 GB avoids a painful redo for about $1.40/month extra.)
+3. **Size**: `120` GB. (The weights are 83 GB; you can grow a volume later but you can
+   never shrink it, so the headroom is worth about $1.40/month.)
 4. **Name**: `longcat-weights`. Click **Create**.
 
 **2.2 — Start a temporary Pod to fill the volume**
@@ -146,8 +146,8 @@ hour to do it once.
 2. On the left, under **Network Volume**, select `longcat-weights`. The datacenter is
    now locked to match.
 3. Pick the **cheapest GPU available** — you are only downloading files, the GPU is
-   irrelevant. An RTX A4000 or similar is fine. Make sure it has at least **32 GB of
-   system RAM** (shown in the card) for the conversion step.
+   irrelevant. An RTX A4000 or similar is fine. (Only if you plan to use the optional
+   bfloat16 conversion below: pick one with at least **32 GB of system RAM**.)
 4. Template: **RunPod PyTorch** (any recent version).
 5. Click **Deploy On-Demand**. Wait until the pod shows **Running**.
 
@@ -159,19 +159,60 @@ terminal opens in your browser. Paste this, replacing `YOUR-USERNAME`:
 ```bash
 cd /workspace
 git clone https://github.com/YOUR-USERNAME/LongCat-Video-serverless.git code
-bash code/serverless/setup_weights.sh
 ```
 
 (For a private repo, git will ask for your username and the `ghp_...` token again.)
 
-This will:
+Now start the download **in the background**, so that closing the browser tab or losing
+your internet connection does not kill it:
 
-* download all 83 GB into `/workspace/weights/LongCat-Video` (15–40 minutes), then
-* convert the big files from float32 to bfloat16, ending at about 44 GB (10–20 minutes).
+```bash
+nohup bash code/serverless/setup_weights.sh > /workspace/setup.log 2>&1 &
+```
 
-You will see the final size printed at the end. **If your internet connection to the web
-terminal drops, just run `bash code/serverless/setup_weights.sh` again** — it resumes
-where it left off and skips files that are already converted.
+Watch the progress with:
+
+```bash
+tail -f /workspace/setup.log
+```
+
+`tail -f` just shows the log — pressing `Ctrl+C` stops the *watching*, not the download.
+You can close the browser, come back later, and run `tail -f /workspace/setup.log` again.
+
+This downloads all 83 GB into `/workspace/weights/LongCat-Video` and takes 15–40 minutes.
+The weights are stored exactly as Meituan published them — nothing is modified.
+
+**2.3b — Check it actually finished**
+
+```bash
+ls /workspace/weights/LongCat-Video
+du -sh /workspace/weights/LongCat-Video
+find /workspace/weights/LongCat-Video -name "*.incomplete" | wc -l
+```
+
+You want to see the folders `dit  lora  scheduler  text_encoder  tokenizer  vae`, a total
+of about **83 GB**, and **0** incomplete files. If the size is short or incomplete files
+remain, just run the `nohup` command again — it resumes where it left off.
+
+<details>
+<summary><b>Optional: make cold starts about twice as fast</b> (click to expand)</summary>
+
+The published checkpoint stores the model in float32, but `handler.py` loads it with
+`torch_dtype=torch.bfloat16` — so PyTorch throws away that extra precision on every
+single cold start anyway. Doing the conversion once on disk gives the GPU **bit-identical
+weights** and produces **identical videos**, but each cold start then reads ~44 GB instead
+of ~83 GB (saving roughly 1–2 minutes and a few cents per cold start).
+
+```bash
+bash code/serverless/setup_weights.sh --convert-bf16
+```
+
+**The catch:** it is irreversible. If you ever want to run this model in float32 or
+float16 — a different framework, a fine-tuning experiment, a quality comparison — you
+would have to download the 83 GB again. If you are unsure, skip it. Everything works
+fine without it, and you can always run the command later.
+
+</details>
 
 **2.4 — Delete the Pod**
 
@@ -333,6 +374,24 @@ new release on GitHub. Watch the Builds tab until it succeeds.
 
 ## Troubleshooting
 
+**I interrupted the download and want to start Part 2 completely over**
+
+On the Pod's web terminal, wipe everything and re-clone (the volume itself stays):
+
+```bash
+pkill -f setup_weights.sh                 # stop anything still running
+pkill -f snapshot_download
+rm -rf /workspace/weights/LongCat-Video   # partial weights
+rm -rf /workspace/weights/.cache          # leftover download bookkeeping
+rm -rf ~/.cache/huggingface               # Hugging Face cache
+rm -rf /workspace/code                    # old copy of your repo
+rm -f  /workspace/setup.log
+df -h /workspace                          # confirm the space came back
+```
+
+Then repeat step 2.3 from the `git clone` onwards. (You usually do *not* need this —
+re-running `setup_weights.sh` resumes a partial download automatically.)
+
 **"Could not find the LongCat-Video weights"**
 The network volume is not attached to the endpoint, or the files are in the wrong place.
 Edit the endpoint and attach `longcat-weights`. To verify the contents, start a temporary
@@ -340,7 +399,7 @@ pod with that volume and run `ls /workspace/weights/LongCat-Video` — you shoul
 `dit`, `text_encoder`, `vae`, `tokenizer`, `scheduler`, `lora`.
 
 **The job sits in `IN_QUEUE` for a long time**
-Normal on the first request: RunPod is pulling a 12 GB image and loading 44 GB of weights.
+Normal on the first request: RunPod is pulling a 12 GB image and loading 83 GB of weights.
 Expect 3–5 minutes cold, ~1–2 minutes on later cold starts thanks to FlashBoot. If it
 lasts more than 10 minutes, check the **Workers** tab — "no GPUs available" means the
 datacenter your volume lives in has none of your selected GPU type free right now; edit
